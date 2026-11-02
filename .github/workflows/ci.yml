@@ -23,9 +23,9 @@ jobs:
     name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -45,9 +45,9 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -84,7 +84,7 @@ jobs:
 
       - name: Upload test & coverage reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reports-py${{ matrix.python-version }}
           path: |
@@ -96,9 +96,9 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -106,14 +106,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Start the app and check its health endpoint
+      - name: Start the app and check its health and metrics endpoints
+        env:
+          METRICS_PORT: "8000"
         run: |
-          streamlit run app.py --server.headless true --server.port 8501 > streamlit.log 2>&1 &
+          python run.py --server.headless true --server.port 8501 > streamlit.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -fs http://localhost:8501/_stcore/health; then
               echo ""
               echo "✅ App is up after ${i}s"
-              echo "### 🚀 Streamlit app started successfully in ${i}s" >> "$GITHUB_STEP_SUMMARY"
+              curl -fs http://localhost:8000/metrics | grep '^fitbit_' || { echo "❌ No app metrics"; exit 1; }
+              echo "### 🚀 Streamlit app started in ${i}s and exposes Prometheus metrics" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             sleep 1
@@ -122,20 +125,98 @@ jobs:
           cat streamlit.log
           exit 1
 
+  infra:
+    name: Validate Terraform, Kubernetes & monitoring config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform format
+        run: terraform fmt -check -recursive -diff terraform
+
+      - name: Terraform init & validate
+        working-directory: terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Validate Kubernetes manifests (kubeconform)
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          ./kubeconform -strict -summary k8s/
+
+      - name: Check alert rules and dashboard queries (promtool)
+        run: |
+          pip install pyyaml
+          python scripts/check_monitoring.py promtool-check
+          docker run --rm -v "$PWD/promtool-check:/check" --entrypoint promtool \
+            prom/prometheus:v3.15.1 check rules /check/alert_rules.yaml /check/dashboard_rules.yaml
+
+      - name: Summary
+        run: echo "### 🏗️ Terraform, Kubernetes manifests and PromQL are valid" >> "$GITHUB_STEP_SUMMARY"
+
+  k8s:
+    name: Deploy to Kubernetes (kind)
+    needs: [test, infra]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: fitbit-app:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: fitbit
+
+      - name: Load image into the cluster
+        run: kind load docker-image fitbit-app:latest --name fitbit
+
+      - name: Deploy manifests
+        run: |
+          kubectl apply -f k8s/
+          kubectl -n fitbit rollout status deployment/fitbit-app --timeout=300s
+          kubectl -n fitbit get pods -o wide
+
+      - name: Check the app and metrics through the Service
+        run: |
+          kubectl -n fitbit port-forward svc/fitbit-app 8501:80 8000:8000 &
+          sleep 5
+          curl -fs http://localhost:8501/_stcore/health && echo ""
+          curl -fs http://localhost:8000/metrics | grep '^fitbit_'
+          echo "### ☸️ Deployed 2 replicas to Kubernetes and both are ready" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show cluster state on failure
+        if: failure()
+        run: |
+          kubectl -n fitbit describe pods
+          kubectl -n fitbit logs -l app.kubernetes.io/name=fitbit-app --tail=50
+
   docker:
-    name: Docker build & test
-    needs: test
+    name: Docker build, test & publish
+    needs: [smoke, k8s]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write # needed to push to GitHub Container Registry
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true # make the image available to the next steps
@@ -145,12 +226,13 @@ jobs:
 
       - name: Run container and wait until healthy
         run: |
-          docker run -d --name fitbit -p 8501:8501 fitbit-app:test
+          docker run -d --name fitbit -p 8501:8501 -p 8000:8000 fitbit-app:test
           for i in $(seq 1 60); do
             status=$(docker inspect -f '{{.State.Health.Status}}' fitbit)
             echo "Health: $status"
             if [ "$status" = "healthy" ]; then
               curl -fs http://localhost:8501/_stcore/health && echo ""
+              curl -fs http://localhost:8000/metrics | grep -q fitbit_app_runs_total
               echo "### 🐳 Docker container is healthy (${i}s)" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
@@ -166,20 +248,25 @@ jobs:
           docker images fitbit-app:test --format "Image size: {{.Size}}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Only publish from main, never from pull requests
+      - name: Set up QEMU (for the arm64 build, e.g. Apple Silicon Macs)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/setup-qemu-action@v4
+
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push image to GHCR
+      - name: Push multi-arch image to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}

@@ -15,3 +15,7 @@ pyproject.toml
 requirements-dev.txt
 Dockerfile
 docker-compose.yml
+k8s
+terraform
+monitoring
+scripts

@@ -1,16 +1,22 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import time
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+import metrics
+
 # -------------------------------------------
 # 🎯 PAGE CONFIG
 # -------------------------------------------
 st.set_page_config(page_title="Fitbit Activity Clustering", layout="wide", page_icon="🏃")
+
+metrics.start_metrics_server()
+metrics.APP_RUNS.inc()
 
 st.title("🏃 Fitbit Activity Clustering App (PCA + K-Means)")
 st.write("""
@@ -24,6 +30,7 @@ You can also input your own daily stats to see **which cluster you belong to**.
 # -------------------------------------------
 @st.cache_data
 def load_and_train():
+    start = time.perf_counter()
     # Load your Fitbit dataset
     df = pd.read_csv("dailyActivity_merged.csv")
     df = df.drop(columns=['Id', 'ActivityDate'], errors='ignore')
@@ -52,6 +59,9 @@ def load_and_train():
     kmeans.fit(X_pca)
     df['cluster'] = kmeans.labels_
 
+    metrics.TRAINING_SECONDS.set(time.perf_counter() - start)
+    metrics.DATASET_ROWS.set(len(df))
+
     return df, features, scaler, pca, kmeans, X_pca
 
 
@@ -66,6 +76,8 @@ def label_clusters(df):
 
 df, features, scaler, pca, kmeans, X_pca = load_and_train()
 cluster_names = label_clusters(df)
+for cluster_id, level in cluster_names.items():
+    metrics.CLUSTER_SIZE.labels(level=level).set(int((df["cluster"] == cluster_id).sum()))
 
 # -------------------------------------------
 # 📊 CLUSTER VISUALIZATION
@@ -124,9 +136,11 @@ if submitted:
                             LightlyActiveMinutes, SedentaryMinutes]])
 
     # Scale + PCA transform
-    user_scaled = scaler.transform(user_input)
-    user_pca = pca.transform(user_scaled)
-    user_cluster = kmeans.predict(user_pca)[0]
+    with metrics.PREDICTION_LATENCY.time():
+        user_input = pd.DataFrame(user_input, columns=features)
+        user_scaled = scaler.transform(user_input)
+        user_pca = pca.transform(user_scaled)
+        user_cluster = kmeans.predict(user_pca)[0]
 
     # Display result
     st.success(f"✅ You belong to **Cluster {user_cluster}**")
@@ -134,6 +148,7 @@ if submitted:
     # Interpretation
     st.subheader("📋 Cluster Interpretation")
     user_level = cluster_names[user_cluster]
+    metrics.PREDICTIONS.labels(level=user_level).inc()
     if user_level == "active":
         st.markdown(f"""
         ### 🏃 Cluster {user_cluster}: Highly Active Users

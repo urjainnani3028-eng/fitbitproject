@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fitbit-app
+  namespace: fitbit
+  labels:
+    app.kubernetes.io/name: fitbit-app
+spec:
+  type: ClusterIP
+  # Streamlit keeps each user's session on one pod, so keep users on the same pod
+  sessionAffinity: ClientIP
+  selector:
+    app.kubernetes.io/name: fitbit-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: metrics
+      port: 8000
+      targetPort: metrics

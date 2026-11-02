@@ -4,5 +4,6 @@ services:
     image: fitbit-app:latest
     container_name: fitbit-app
     ports:
-      - "8501:8501"
+      - "8501:8501"   # app
+      - "8000:8000"   # Prometheus metrics
     restart: unless-stopped

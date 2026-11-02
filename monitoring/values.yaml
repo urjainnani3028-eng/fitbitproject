@@ -1,0 +1,107 @@
+# Settings for the kube-prometheus-stack Helm chart
+# (Prometheus + Grafana + kube-state-metrics + node-exporter).
+# Tuned to run comfortably on a laptop with Docker Desktop Kubernetes.
+
+# ---------------- Prometheus ----------------
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    retention: 3d
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+    # Scrape every pod in the "fitbit" namespace that has the
+    # prometheus.io/scrape: "true" annotation (see k8s/10-deployment.yaml)
+    additionalScrapeConfigs:
+      - job_name: fitbit-app
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [fitbit]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            regex: "true"
+            action: keep
+          # only the container port named "metrics" (8000), not the UI port
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: metrics
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            regex: (.+)
+            target_label: __metrics_path__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+
+# Alert rules for the app. They show on Prometheus' "Alerts" page.
+additionalPrometheusRulesMap:
+  fitbit-app:
+    groups:
+      - name: fitbit-app
+        rules:
+          - alert: FitbitAppDown
+            expr: absent(up{job="fitbit-app"} == 1)
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: No Fitbit app pod is responding to Prometheus
+          - alert: FitbitAppReplicasMissing
+            expr: count(up{job="fitbit-app"} == 1) < 2
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Only {{ $value }} of 2 Fitbit app pods are up"
+          - alert: FitbitSlowPredictions
+            expr: histogram_quantile(0.95, sum by (le) (rate(fitbit_prediction_latency_seconds_bucket[5m]))) > 0.1
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: 95% of predictions are slower than 100 ms
+
+# ---------------- Grafana ----------------
+grafana:
+  admin:
+    # Secret created by Terraform with a random password (terraform/main.tf)
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  sidecar:
+    dashboards:
+      enabled: true
+      # Any ConfigMap with this label is loaded as a dashboard
+      label: grafana_dashboard
+      labelValue: "1"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+
+# Alertmanager isn't needed for a local demo (alerts still show in Prometheus)
+alertmanager:
+  enabled: false
+
+# Docker Desktop runs these control-plane parts in a way Prometheus can't
+# reach, which would only produce "target down" noise.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+# node-exporter fails to start on Docker Desktop with the host root mount
+prometheus-node-exporter:
+  hostRootFsMount:
+    enabled: false
