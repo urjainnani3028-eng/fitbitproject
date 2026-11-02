@@ -1,0 +1,17 @@
+# Keep the image small: only app.py, the CSV and requirements.txt are needed
+.git
+.github
+.devcontainer
+tests
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+test-results.xml
+README.md
+pyproject.toml
+requirements-dev.txt
+Dockerfile
+docker-compose.yml

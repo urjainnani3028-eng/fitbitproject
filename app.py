@@ -54,7 +54,18 @@ def load_and_train():
 
     return df, features, scaler, pca, kmeans, X_pca
 
+
+def label_clusters(df):
+    """K-Means numbers clusters arbitrarily, so name them by average steps.
+
+    Returns a dict like {cluster_id: "sedentary" | "moderate" | "active"}.
+    """
+    order = df.groupby("cluster")["TotalSteps"].mean().sort_values().index
+    return dict(zip(order, ["sedentary", "moderate", "active"]))
+
+
 df, features, scaler, pca, kmeans, X_pca = load_and_train()
+cluster_names = label_clusters(df)
 
 # -------------------------------------------
 # 📊 CLUSTER VISUALIZATION
@@ -122,23 +133,24 @@ if submitted:
 
     # Interpretation
     st.subheader("📋 Cluster Interpretation")
-    if user_cluster == 0:
-        st.markdown("""
-        ### 🏃 Cluster 0: Highly Active Users
+    user_level = cluster_names[user_cluster]
+    if user_level == "active":
+        st.markdown(f"""
+        ### 🏃 Cluster {user_cluster}: Highly Active Users
         - High total steps and calorie burn  
         - Very low sedentary minutes  
         - Excellent overall activity level! 💪
         """)
-    elif user_cluster == 1:
-        st.markdown("""
-        ### ⚖️ Cluster 1: Moderately Active Users
+    elif user_level == "moderate":
+        st.markdown(f"""
+        ### ⚖️ Cluster {user_cluster}: Moderately Active Users
         - Balanced active and sedentary time  
         - Moderate step count and activity minutes  
         - Good lifestyle, but room for improvement 👍
         """)
     else:
-        st.markdown("""
-        ### 🪑 Cluster 2: Sedentary Users
+        st.markdown(f"""
+        ### 🪑 Cluster {user_cluster}: Sedentary Users
         - Low step count and active minutes  
         - High sedentary time  
         - Try adding short walks or workouts to boost activity 🚶

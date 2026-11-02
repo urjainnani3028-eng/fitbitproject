@@ -1,0 +1,13 @@
+# Opens PRs automatically when dependencies have updates.
+# Each PR runs the CI workflow, so you'll know if an update breaks anything.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/W = pycodestyle, F = pyflakes (unused imports, undefined names, etc.)
+select = ["E", "F", "W"]
+# E501: long lines are fine; W291: trailing "  " is used for Markdown line breaks in app.py
+ignore = ["E501", "W291"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

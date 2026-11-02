@@ -1,0 +1,186 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # adds a "Run workflow" button in the Actions tab
+
+# Cancel an older run if a newer commit is pushed to the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff
+        run: ruff check --output-format=github .
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage
+        env:
+          MPLBACKEND: Agg # no display on CI runners
+        run: |
+          pytest --cov=. --cov-report=term-missing --cov-report=xml \
+                 --junitxml=test-results.xml
+
+      - name: Add test summary to the run page
+        if: always()
+        run: |
+          echo "### 🧪 Test results (Python ${{ matrix.python-version }})" >> "$GITHUB_STEP_SUMMARY"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          try:
+              s = ET.parse("test-results.xml").getroot()
+              s = s if s.tag == "testsuite" else s.find("testsuite")
+              t, f, e, sk = (int(s.get(k, 0)) for k in ("tests", "failures", "errors", "skipped"))
+              print(f"| Total | ✅ Passed | ❌ Failed | ⏭️ Skipped |\n|---|---|---|---|\n| {t} | {t-f-e-sk} | {f+e} | {sk} |")
+          except Exception as exc:
+              print(f"Could not read test results: {exc}")
+          PY
+
+      - name: Upload test & coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-py${{ matrix.python-version }}
+          path: |
+            test-results.xml
+            coverage.xml
+
+  smoke:
+    name: Smoke test (Streamlit boots)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start the app and check its health endpoint
+        run: |
+          streamlit run app.py --server.headless true --server.port 8501 > streamlit.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:8501/_stcore/health; then
+              echo ""
+              echo "✅ App is up after ${i}s"
+              echo "### 🚀 Streamlit app started successfully in ${i}s" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "❌ App did not start within 30s"
+          cat streamlit.log
+          exit 1
+
+  docker:
+    name: Docker build & test
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # needed to push to GitHub Container Registry
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true # make the image available to the next steps
+          tags: fitbit-app:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run container and wait until healthy
+        run: |
+          docker run -d --name fitbit -p 8501:8501 fitbit-app:test
+          for i in $(seq 1 60); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' fitbit)
+            echo "Health: $status"
+            if [ "$status" = "healthy" ]; then
+              curl -fs http://localhost:8501/_stcore/health && echo ""
+              echo "### 🐳 Docker container is healthy (${i}s)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "❌ Container never became healthy"
+          docker logs fitbit
+          exit 1
+
+      - name: Show image size
+        if: always()
+        run: |
+          docker images fitbit-app:test --format "Image size: {{.Size}}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Only publish from main, never from pull requests
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha

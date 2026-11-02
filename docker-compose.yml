@@ -1,0 +1,8 @@
+services:
+  fitbit-app:
+    build: .
+    image: fitbit-app:latest
+    container_name: fitbit-app
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
