@@ -1,5 +1,5 @@
 # ---- Fitbit Activity Clustering (Streamlit) ----
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Faster, quieter Python and pip inside containers
 ENV PYTHONDONTWRITEBYTECODE=1 \
